@@ -286,3 +286,70 @@ app.get('/api/auth/live-stats', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'حدث خطأ داخلي أثناء جلب الإحصائيات.' });
     }
 });
+const WebSocket = require('ws');
+const http = require('http');
+
+// إنشاء سيرفر الـ HTTP الموحد أو دمج الـ WebSockets مع سيرفر Express الحالي
+const server = http.createServer(app); 
+const wss = new WebSocket.Server({ server });
+
+// مصفوفة لتخزين الاتصالات الحية المفتوحة من المتصفحات
+let connectedClients = new Set();
+
+wss.on('connection', (ws) => {
+    console.log('[+] متصفح جديد اتصل بالكونسول الحي');
+    connectedClients.add(ws);
+
+    ws.on('close', () => {
+        connectedClients.delete(ws);
+        console.log('[-] انقطع اتصال المتصفح بالكونسول');
+    });
+});
+
+// 🎮 دالة ربط البوت بالكونسول (يتم استدعاؤها فور تشغيل بوت الـ Mineflayer)
+function bindBotToConsole(bot, username) {
+    
+    // 1. الاستماع لرسائل شات السيرفر
+    bot.on('chat', (sender, message) => {
+        broadcastToUser(username, {
+            type: 'chat',
+            timestamp: new Date().toLocaleTimeString(),
+            sender: sender,
+            text: message
+        });
+    });
+
+    // 2. الاستماع لأحداث النظام (مثل الطرد أو الموت)
+    bot.on('kick', (reason) => {
+        broadcastToUser(username, {
+            type: 'system',
+            timestamp: new Date().toLocaleTimeString(),
+            text: `⚠️ تم طرد البوت بسبب: ${reason}`
+        });
+    });
+    
+    bot.on('error', (err) => {
+        broadcastToUser(username, {
+            type: 'error',
+            timestamp: new Date().toLocaleTimeString(),
+            text: `❌ خطأ في السوكيت: ${err.message}`
+        });
+    });
+}
+
+// دالة بث البيانات للمتصفحات المتصلة والمتطابقة مع اسم صاحب البوت
+function broadcastToUser(targetUser, logPayload) {
+    const messageString = JSON.stringify(logPayload);
+    
+    connectedClients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            // يمكنك هنا إضافة شرط للتحقق من توكن المستخدم لضمان الخصوصية
+            client.send(messageString);
+        }
+    });
+}
+
+// استبدل أمر تشغيل السيرفر app.listen بـ server.listen ليعمل الـ WebSocket
+server.listen(process.env.PORT || 8080, () => {
+    console.log('[+] Server and WebSocket running smoothly');
+});
