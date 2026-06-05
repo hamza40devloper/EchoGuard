@@ -5,17 +5,19 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
+const WebSocket = require('ws');
+const http = require('http');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔌 الاتصال بقاعدة البيانات (MongoDB كمثال وهي الأفضل لحفظ الحسابات والمفضلات)
+// 🔌 الاتصال بقاعدة البيانات MongoDB Atlas
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('[+] Connected to Security Database'))
     .catch(err => console.error('[-] Database Connection Error:', err));
 
-// 📝 تعريف نموذج بيانات المستخدم (User Schema)
+// 📝 تعريف نموذج بيانات المستخدم المصحح (User Schema) بعد إضافة الحقول المفقودة
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
@@ -23,7 +25,9 @@ const userSchema = new mongoose.Schema({
     avatar: { type: String, default: 'https://i.postimg.cc/L8g1gJ9K/hamza-developer.png' },
     isVerified: { type: Boolean, default: false },
     otpCode: { type: String, default: null },
-    otpExpires: { type: Date, default: null }
+    otpExpires: { type: Date, default: null },
+    favorites: { type: [String], default: [] }, // تم الإصلاح: إضافة مصفوفة المفضلة
+    totalHours: { type: Number, default: 0 }    // تم الإصلاح: إضافة حقل ساعات العمل
 });
 const User = mongoose.model('User', userSchema);
 
@@ -31,17 +35,32 @@ const User = mongoose.model('User', userSchema);
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: process.env.EMAIL_USER, // إيميل الجيميل الخاص بك
-        pass: process.env.EMAIL_PASS  // رمز تطبيق الجيميل (App Password) وليس الباسورد العادي
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
     }
 });
+
+// 🔒 برمجية وسيطة للتحقق من التوكن (تم تقديمها هنا لترتيب الكود ومنع خطأ ReferenceError)
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+        return res.status(401).json({ error: 'غير مسموح! يجب تسجيل الدخول أولاً.' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'الجلسة انتهت أو التوكن غير صالح.' });
+        req.userId = user.userId;
+        next();
+    });
+};
 
 // 🔑 1. مسار تسجيل حساب جديد وإنشاء الرمز السداسي (Register)
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
 
-        // التحقق من المدخلات لمنع الثغرات
         if (!username || !email || !password) {
             return res.status(400).json({ error: 'جميع الحقول مطلوبة!' });
         }
@@ -51,12 +70,9 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ error: 'اسم المستخدم أو البريد الإلكتروني مسجل بالفعل.' });
         }
 
-        // تشفير كلمة المرور بقوة 12 بت لمنع فك التشفير من الهاكرز
         const hashedPassword = await bcrypt.hash(password, 12);
-
-        // توليد رمز سداسي عشوائي
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const otpExpires = new Date(Date.now() + 15 * 60 * 1000); // صلاحية الرمز 15 دقيقة
+        const otpExpires = new Date(Date.now() + 15 * 60 * 1000);
 
         const newUser = new User({
             username,
@@ -68,7 +84,6 @@ app.post('/api/auth/register', async (req, res) => {
 
         await newUser.save();
 
-        // إرسال الرمز السداسي إلى بريد المستخدم
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: email,
@@ -99,11 +114,10 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         }
 
         user.isVerified = true;
-        user.otpCode = null; // تنظيف الرمز بعد التحقق
+        user.otpCode = null;
         user.otpExpires = null;
         await user.save();
 
-        // إنشاء توكن أمان (JWT) صالح لمدة 7 أيام للولوج التلقائي
         const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         res.status(200).json({ 
@@ -126,7 +140,6 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ error: 'الحساب غير موجود أو لم يتم تفعيله عبر البريد بعد.' });
         }
 
-        // مقارنة الهاش المشفر
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ error: 'بيانات الاعتماد غير صحيحة.' });
@@ -142,43 +155,23 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`[+] Auth Server securely running on port ${PORT}`));
-// برمجية وسيطة (Middleware) للتحقق من التوكن وحماية المسار من الاختراق
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // جلب التوكن من الهيدر
-
-    if (!token) {
-        return res.status(401).json({ error: 'غير مسموح! يجب تسجيل الدخول أولاً.' });
-    }
-
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'الجلسة انتهت أو التوكن غير صالح.' });
-        req.userId = user.userId; // تمرير معرف المستخدم للمسار التالي
-        next();
-    });
-};
-
-// 🖼️ مسار رفع وتحديث الصورة الشخصية (محمي تماماً)
+// 🖼️ 4. مسار رفع وتحديث الصورة الشخصية
 app.post('/api/auth/update-avatar', authenticateToken, async (req, res) => {
     try {
-        const { avatarData } = req.body; // استقبال الصورة كـ Base64 من الواجهة
+        const { avatarData } = req.body;
 
         if (!avatarData) {
             return res.status(400).json({ error: 'لم يتم إرسال أي بيانات للصورة.' });
         }
 
-        // الحماية: التحقق من حجم السلسلة النصية لمنع رفع ملفات ضخمة تستهلك الذاكرة
         if (avatarData.length > 2 * 1024 * 1024) { 
             return res.status(400).json({ error: 'حجم الصورة كبير جداً! الحد الأقصى هو 2 ميجابايت.' });
         }
 
-        // البحث عن المستخدم وتحديث الصورة في قاعدة البيانات
         const updatedUser = await User.findByIdAndUpdate(
             req.userId,
             { avatar: avatarData },
-            { new: true } // إرجاع البيانات الجديدة بعد التحديث
+            { new: true }
         );
 
         if (!updatedUser) {
@@ -195,22 +188,20 @@ app.post('/api/auth/update-avatar', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'حدث خطأ داخلي أثناء حفظ الصورة.' });
     }
 });
-// 🔐 مسار مزامنة المفضلة عند تسجيل الدخول (دمج مصفوفة المتصفح مع قاعدة البيانات)
+
+// 🔐 5. مسار مزامنة المفضلة عند تسجيل الدخول
 app.post('/api/auth/sync-favorites', authenticateToken, async (req, res) => {
     try {
-        const { localFavorites } = req.body; // مصفوفة المعرفات القادمة من المتصفح
+        const { localFavorites } = req.body;
 
         if (!Array.isArray(localFavorites)) {
             return res.status(400).json({ error: 'صيغة البيانات المرسلة غير صحيحة.' });
         }
 
-        // جلب المستخدم الحالي
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
 
-        // دمج المصفوفتين مع إزالة التكرار باستخدام Set
         const mergedFavorites = [...new Set([...user.favorites, ...localFavorites])];
-        
         user.favorites = mergedFavorites;
         await user.save();
 
@@ -223,7 +214,7 @@ app.post('/api/auth/sync-favorites', authenticateToken, async (req, res) => {
     }
 });
 
-// ⭐ مسار إضافة / إزالة أداة من المفضلة مباشرة (Toggle Favorite)
+// ⭐ 6. مسار إضافة / إزالة أداة من المفضلة مباشرة
 app.post('/api/auth/toggle-favorite', authenticateToken, async (req, res) => {
     try {
         const { toolId } = req.body;
@@ -236,11 +227,9 @@ app.post('/api/auth/toggle-favorite', authenticateToken, async (req, res) => {
         let action = '';
 
         if (index > -1) {
-            // إذا كانت موجودة، قم بإزالتها
             user.favorites.splice(index, 1);
             action = 'removed';
         } else {
-            // إذا لم تكن موجودة، أضفها
             user.favorites.push(toolId);
             action = 'added';
         }
@@ -255,15 +244,13 @@ app.post('/api/auth/toggle-favorite', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'فشل تعديل حالة المفضلة في السيرفر.' });
     }
 });
-// 📊 مسار جلب الإحصائيات الحية للمستخدم (محمي بـ JWT)
+
+// 📊 7. مسار جلب الإحصائيات الحية للمدخلات
 app.get('/api/auth/live-stats', authenticateToken, async (req, res) => {
     try {
-        // 1. جلب بيانات الساعات المستهلكة من مستند المستخدم في MongoDB
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
 
-        // 2. الاتصال بسيرفر البوتات (Mineflayer) لمعرفة عدد البوتات النشطة لهذا المستخدم حالياً
-        // نقوم بإرسال طلب داخلي باستخدام الـ API Key المشترك لحماية البيانات
         let activeBotsCount = 0;
         try {
             const botResponse = await fetch(`https://mc-bot-production.up.railway.app/api/user-bots-count/${user.username}`, {
@@ -275,7 +262,6 @@ app.get('/api/auth/live-stats', authenticateToken, async (req, res) => {
             console.error('فشل جلب إحصائيات البوتات الحية، سيتم عرض 0 مؤقتاً');
         }
 
-        // 3. إرسال الإحصائيات كاملة للواجهة الأمامية
         res.status(200).json({
             activeBots: activeBotsCount,
             totalHours: user.totalHours || 0,
@@ -286,14 +272,11 @@ app.get('/api/auth/live-stats', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'حدث خطأ داخلي أثناء جلب الإحصائيات.' });
     }
 });
-const WebSocket = require('ws');
-const http = require('http');
 
-// إنشاء سيرفر الـ HTTP الموحد أو دمج الـ WebSockets مع سيرفر Express الحالي
+// 🌐 إنشاء سيرفر الـ HTTP الموحد لربط الـ Express مع الـ WebSocket
 const server = http.createServer(app); 
 const wss = new WebSocket.Server({ server });
 
-// مصفوفة لتخزين الاتصالات الحية المفتوحة من المتصفحات
 let connectedClients = new Set();
 
 wss.on('connection', (ws) => {
@@ -306,10 +289,8 @@ wss.on('connection', (ws) => {
     });
 });
 
-// 🎮 دالة ربط البوت بالكونسول (يتم استدعاؤها فور تشغيل بوت الـ Mineflayer)
+// 🎮 دالة ربط البوت بالكونسول (تستدعى عند بدء تشغيل بوت الماينكرافت)
 function bindBotToConsole(bot, username) {
-    
-    // 1. الاستماع لرسائل شات السيرفر
     bot.on('chat', (sender, message) => {
         broadcastToUser(username, {
             type: 'chat',
@@ -319,7 +300,6 @@ function bindBotToConsole(bot, username) {
         });
     });
 
-    // 2. الاستماع لأحداث النظام (مثل الطرد أو الموت)
     bot.on('kick', (reason) => {
         broadcastToUser(username, {
             type: 'system',
@@ -337,19 +317,17 @@ function bindBotToConsole(bot, username) {
     });
 }
 
-// دالة بث البيانات للمتصفحات المتصلة والمتطابقة مع اسم صاحب البوت
 function broadcastToUser(targetUser, logPayload) {
     const messageString = JSON.stringify(logPayload);
-    
     connectedClients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-            // يمكنك هنا إضافة شرط للتحقق من توكن المستخدم لضمان الخصوصية
             client.send(messageString);
         }
     });
 }
 
-// استبدل أمر تشغيل السيرفر app.listen بـ server.listen ليعمل الـ WebSocket
-server.listen(process.env.PORT || 8080, () => {
-    console.log('[+] Server and WebSocket running smoothly');
+// تم الإصلاح: تشغيل السيرفر الموحد (HTTP + WebSocket) على منفذ بيئة الاستضافة
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+    console.log(`[+] Auth Server & WebSockets securely running on port ${PORT}`);
 });
