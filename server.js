@@ -255,3 +255,34 @@ app.post('/api/auth/toggle-favorite', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'فشل تعديل حالة المفضلة في السيرفر.' });
     }
 });
+// 📊 مسار جلب الإحصائيات الحية للمستخدم (محمي بـ JWT)
+app.get('/api/auth/live-stats', authenticateToken, async (req, res) => {
+    try {
+        // 1. جلب بيانات الساعات المستهلكة من مستند المستخدم في MongoDB
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
+
+        // 2. الاتصال بسيرفر البوتات (Mineflayer) لمعرفة عدد البوتات النشطة لهذا المستخدم حالياً
+        // نقوم بإرسال طلب داخلي باستخدام الـ API Key المشترك لحماية البيانات
+        let activeBotsCount = 0;
+        try {
+            const botResponse = await fetch(`https://mc-bot-production.up.railway.app/api/user-bots-count/${user.username}`, {
+                headers: { 'x-api-key': process.env.API_SECRET_KEY }
+            });
+            const botData = await botResponse.json();
+            activeBotsCount = botData.activeCount || 0;
+        } catch (botErr) {
+            console.error('فشل جلب إحصائيات البوتات الحية، سيتم عرض 0 مؤقتاً');
+        }
+
+        // 3. إرسال الإحصائيات كاملة للواجهة الأمامية
+        res.status(200).json({
+            activeBots: activeBotsCount,
+            totalHours: user.totalHours || 0,
+            savedFavorites: user.favorites ? user.favorites.length : 0
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: 'حدث خطأ داخلي أثناء جلب الإحصائيات.' });
+    }
+});
