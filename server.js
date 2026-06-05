@@ -195,3 +195,63 @@ app.post('/api/auth/update-avatar', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'حدث خطأ داخلي أثناء حفظ الصورة.' });
     }
 });
+// 🔐 مسار مزامنة المفضلة عند تسجيل الدخول (دمج مصفوفة المتصفح مع قاعدة البيانات)
+app.post('/api/auth/sync-favorites', authenticateToken, async (req, res) => {
+    try {
+        const { localFavorites } = req.body; // مصفوفة المعرفات القادمة من المتصفح
+
+        if (!Array.isArray(localFavorites)) {
+            return res.status(400).json({ error: 'صيغة البيانات المرسلة غير صحيحة.' });
+        }
+
+        // جلب المستخدم الحالي
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
+
+        // دمج المصفوفتين مع إزالة التكرار باستخدام Set
+        const mergedFavorites = [...new Set([...user.favorites, ...localFavorites])];
+        
+        user.favorites = mergedFavorites;
+        await user.save();
+
+        res.status(200).json({ 
+            message: 'تمت مزامنة المفضلة بنجاح مع السحاب', 
+            favorites: user.favorites 
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'حدث خطأ أثناء المزامنة السحابية.' });
+    }
+});
+
+// ⭐ مسار إضافة / إزالة أداة من المفضلة مباشرة (Toggle Favorite)
+app.post('/api/auth/toggle-favorite', authenticateToken, async (req, res) => {
+    try {
+        const { toolId } = req.body;
+        if (!toolId) return res.status(400).json({ error: 'معرف الأداة مطلوب.' });
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'المستخدم غير موجود.' });
+
+        const index = user.favorites.indexOf(toolId);
+        let action = '';
+
+        if (index > -1) {
+            // إذا كانت موجودة، قم بإزالتها
+            user.favorites.splice(index, 1);
+            action = 'removed';
+        } else {
+            // إذا لم تكن موجودة، أضفها
+            user.favorites.push(toolId);
+            action = 'added';
+        }
+
+        await user.save();
+        res.status(200).json({ 
+            message: action === 'added' ? 'تمت الإضافة للمفضلة السحابية' : 'تمت الإزالة من المفضلة السحابية',
+            action,
+            favorites: user.favorites 
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'فشل تعديل حالة المفضلة في السيرفر.' });
+    }
+});
