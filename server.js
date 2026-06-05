@@ -144,3 +144,54 @@ app.post('/api/auth/login', async (req, res) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`[+] Auth Server securely running on port ${PORT}`));
+// برمجية وسيطة (Middleware) للتحقق من التوكن وحماية المسار من الاختراق
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // جلب التوكن من الهيدر
+
+    if (!token) {
+        return res.status(401).json({ error: 'غير مسموح! يجب تسجيل الدخول أولاً.' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: 'الجلسة انتهت أو التوكن غير صالح.' });
+        req.userId = user.userId; // تمرير معرف المستخدم للمسار التالي
+        next();
+    });
+};
+
+// 🖼️ مسار رفع وتحديث الصورة الشخصية (محمي تماماً)
+app.post('/api/auth/update-avatar', authenticateToken, async (req, res) => {
+    try {
+        const { avatarData } = req.body; // استقبال الصورة كـ Base64 من الواجهة
+
+        if (!avatarData) {
+            return res.status(400).json({ error: 'لم يتم إرسال أي بيانات للصورة.' });
+        }
+
+        // الحماية: التحقق من حجم السلسلة النصية لمنع رفع ملفات ضخمة تستهلك الذاكرة
+        if (avatarData.length > 2 * 1024 * 1024) { 
+            return res.status(400).json({ error: 'حجم الصورة كبير جداً! الحد الأقصى هو 2 ميجابايت.' });
+        }
+
+        // البحث عن المستخدم وتحديث الصورة في قاعدة البيانات
+        const updatedUser = await User.findByIdAndUpdate(
+            req.userId,
+            { avatar: avatarData },
+            { new: true } // إرجاع البيانات الجديدة بعد التحديث
+        );
+
+        if (!updatedUser) {
+            return res.status(404).json({ error: 'المستخدم غير موجود.' });
+        }
+
+        res.status(200).json({ 
+            message: 'تم تحديث الصورة الشخصية بنجاح!',
+            avatar: updatedUser.avatar
+        });
+
+    } catch (error) {
+        console.error('Avatar Upload Error:', error);
+        res.status(500).json({ error: 'حدث خطأ داخلي أثناء حفظ الصورة.' });
+    }
+});
